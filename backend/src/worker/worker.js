@@ -12,10 +12,12 @@ const CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY) || 4;  // default 4
 
 // ── Prevent a single EPIPE / uncaught error from killing the worker process ──
 process.on('uncaughtException', (err) => {
-  logger.error(`[${workerId}] Uncaught exception (worker kept alive):`, err.message);
+  logger.error(`[${workerId}] Uncaught exception:`, err.message, err.stack);
+  process.exit(1); // Force Docker container restart to recover from unsafe state
 });
 process.on('unhandledRejection', (reason) => {
-  logger.error(`[${workerId}] Unhandled rejection (worker kept alive):`, reason);
+  logger.error(`[${workerId}] Unhandled rejection:`, reason);
+  process.exit(1); // Force Docker container restart to recover from unsafe state
 });
 
 logger.info(`Starting Worker ${workerId} with concurrency=${CONCURRENCY}`);

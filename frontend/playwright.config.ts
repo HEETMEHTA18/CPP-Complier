@@ -1,2 +1,0 @@
-testDir: 'tests'
-testFramework: 'jest'
