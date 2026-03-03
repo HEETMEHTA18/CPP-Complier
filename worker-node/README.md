@@ -56,13 +56,13 @@ Then edit `.env` with a text editor (Notepad, VS Code, etc.):
 ```env
 REDIS_HOST=192.168.1.10     ← Replace with PC-1's actual LAN IP
 REDIS_PORT=6380
-REDIS_PASSWORD=change_me_strong_password   ← Must match PC-1's REDIS_PASSWORD
+REDIS_PASSWORD=your_redis_password_here   ← Must match PC-1's REDIS_PASSWORD
 
 DB_HOST=192.168.1.10        ← Same PC-1 IP
 DB_PORT=5434
 DB_NAME=coderunner
 DB_USER=postgres
-DB_PASSWORD=postgres
+DB_PASSWORD=your_db_password_here
 
 WORKER_CONCURRENCY=6        ← Adjust for your CPU (see table below)
 SUBMIT_CONCURRENCY=4
