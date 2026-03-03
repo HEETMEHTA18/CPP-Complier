@@ -81,10 +81,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
-    deploy:
-      replicas: 3
-      restart_policy:
-        condition: on-failure
     restart: unless-stopped
 
   pgbouncer:

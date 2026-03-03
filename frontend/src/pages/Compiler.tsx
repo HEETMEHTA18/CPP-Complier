@@ -234,7 +234,9 @@ const Compiler = () => {
                         ) : questions.length === 0 ? (
                             <div style={{ color: 'var(--neon-cyan)' }}>Loading problem details...</div>
                         ) : (
-                            <div dangerouslySetInnerHTML={{ __html: questionDesc.replace(/\n/g, '<br/>') }} />
+                            <pre style={{ whiteSpace: 'pre-wrap', wordWrap: 'break-word', fontFamily: 'inherit', margin: 0 }}>
+                                {questionDesc}
+                            </pre>
                         )}
                     </div>
                 </div>

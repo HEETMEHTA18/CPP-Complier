@@ -107,16 +107,24 @@ class Executor {
     }
   }
 
-  // Executes ALL test cases CONCURRENTLY (compile once, spawn all in parallel)
+  // Executes ALL test cases with LIMITED concurrency (max 5 per batch)
+  // Prevents OOM/resource exhaustion from unlimited concurrent processes
   async runBatch(testCases) {
     if (!testCases || testCases.length === 0) {
       return { verdict: 'accepted', testCasesPassed: 0, totalTestCases: 0, timeTaken: 0, memoryUsed: 0, details: [] };
     }
 
-    // ── CONCURRENT execution — all test cases run simultaneously ──
-    const results = await Promise.all(
-      testCases.map((tc, i) => this._runOneTestCase(tc, i))
-    );
+    // ── LIMITED CONCURRENCY — run up to 5 test cases concurrently, queue the rest ──
+    const MAX_CONCURRENT = 5;
+    const results = [];
+    
+    for (let i = 0; i < testCases.length; i += MAX_CONCURRENT) {
+      const batch = testCases.slice(i, i + MAX_CONCURRENT);
+      const batchResults = await Promise.all(
+        batch.map((tc, batchIdx) => this._runOneTestCase(tc, i + batchIdx))
+      );
+      results.push(...batchResults);
+    }
 
     const totalTestCases = testCases.length;
     const passedCount    = results.filter(r => r.status === 'accepted').length;

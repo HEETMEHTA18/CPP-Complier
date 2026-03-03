@@ -66,6 +66,13 @@ export default function Lobby() {
         }
     }, [connected, send]);
 
+    /* Cleanup countdown interval on unmount to prevent memory leak */
+    useEffect(() => {
+        return () => {
+            if (countdownRef.current) clearInterval(countdownRef.current);
+        };
+    }, []);
+
     const handleJoin = () => {
         if (!connected) { setError('Not connected to server. Please wait...'); return; }
         if (!teamCode.trim()) { setError('Enter your team code'); return; }
