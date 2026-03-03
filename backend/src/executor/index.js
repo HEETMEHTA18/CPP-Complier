@@ -27,7 +27,8 @@ const LANGUAGES = {
 };
 
 /* ── Binary cache ───────────────────────────────────────────────
-   Compiled binaries are stored in temp/bin_cache/<hash>.out and
+   Compiled binaries are stored in bin_cache/<hash>.out (at /app/bin_cache
+   inside the container — regular overlay FS, always exec-capable) and
    reused across submissions with identical source code.
    Avoids the ~1-3s g++ step on every re-submission — very common
    in contests where teams iterate on the same code.
@@ -35,7 +36,11 @@ const LANGUAGES = {
 ─────────────────────────────────────────────────────────────── */
 const BIN_CACHE_MAX = parseInt(process.env.BIN_CACHE_MAX) || 150;
 const _binCacheMap  = new Map();   // compileHash → { execPath, lastUsed }
-const _binCacheDir  = path.join(__dirname, '..', '..', 'temp', 'bin_cache');
+// bin_cache lives OUTSIDE the tmpfs mount (/app/temp) so compiled binaries
+// are on the regular container overlay FS, which is always exec-capable.
+// (Docker tmpfs can be mounted noexec by default, causing "Permission denied"
+//  when the shell tries to execute a newly compiled binary.)
+const _binCacheDir  = path.join(__dirname, '..', '..', 'bin_cache');
 
 // Create the cache directory once on module load
 fs.mkdir(_binCacheDir, { recursive: true }).catch(() => {});
@@ -178,6 +183,9 @@ class Executor {
     try {
       const result = await compilePromise;
       if (result.success) {
+        // Ensure the binary has execute permission (required on Docker/Windows mounts
+        // where g++ may produce a file without the +x bit set).
+        await fs.chmod(cacheTarget, 0o755).catch(() => {});
         _putBinCache(compileHash, cacheTarget);
         this.executable = cacheTarget;
         logger.debug(`[exec] compiled + cached ${compileHash.slice(0, 8)}`);

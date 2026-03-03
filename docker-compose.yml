@@ -130,9 +130,9 @@ services:
       - NODE_OPTIONS=--max-old-space-size=1024
       - BIN_CACHE_MAX=150
     tmpfs:
-      # All source writes, compiled binaries, and test I/O live in RAM.
-      # 512 MB covers ~150 cached binaries (~1 MB each) + active run dirs.
-      # Cleared automatically on container restart — no disk leaks.
+      # Source writes and test I/O live in RAM — fast, auto-cleared on restart.
+      # Compiled binaries are stored in /app/bin_cache (overlay FS, exec-capable)
+      # NOT here, so the exec bit is always respected by the kernel.
       - /app/temp:size=512m,mode=1777
     depends_on:
       pgbouncer:
@@ -169,14 +169,16 @@ services:
   pgadmin:
     image: dpage/pgadmin4:latest
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@arena.local
-      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_DEFAULT_EMAIL: admin@codearena.dev
+      PGADMIN_DEFAULT_PASSWORD: admin123
       PGADMIN_CONFIG_SERVER_MODE: "False"
       PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      PGADMIN_SERVER_JSON_FILE: /pgadmin4/servers.json
     ports:
       - "5050:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
+      - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
     depends_on:
       - db
 
