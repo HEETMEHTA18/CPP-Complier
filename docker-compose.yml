@@ -131,9 +131,8 @@ services:
       - BIN_CACHE_MAX=150
     tmpfs:
       # Source writes and test I/O live in RAM — fast, auto-cleared on restart.
-      # Compiled binaries are stored in /app/bin_cache (overlay FS, exec-capable)
-      # NOT here, so the exec bit is always respected by the kernel.
-      - /app/temp:size=512m,mode=1777
+      # exec is required so the shell can run binaries produced by g++ here.
+      - /app/temp:size=512m,mode=1777,exec
     depends_on:
       pgbouncer:
         condition: service_started
