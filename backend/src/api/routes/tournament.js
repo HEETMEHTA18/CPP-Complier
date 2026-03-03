@@ -228,4 +228,175 @@ router.get('/:id', async (req, res) => {
     }
 });
 
+/* ═══════════════════════════════════════════════════════════
+   POST /api/tournament/:id/upload-csv
+   Body: { csvContent: string, setType: 'even' | 'odd' }
+   Parses CSV, upserts problems in DB, assigns to rooms.
+═══════════════════════════════════════════════════════════ */
+router.post('/:id/upload-csv', async (req, res) => {
+    const { query: dbQuery } = require('../../db');
+    const { csvContent, setType } = req.body;
+
+    if (!csvContent || !['even', 'odd'].includes(setType)) {
+        return res.status(400).json({ error: 'csvContent and setType (even/odd) required' });
+    }
+
+    try {
+        const data = await redisClient.get(`tournament:${req.params.id}`);
+        if (!data) return res.status(404).json({ error: 'Tournament not found' });
+        const tournament = JSON.parse(data);
+
+        // ── Parse CSV ────────────────────────────────────────
+        const lines = csvContent.trim().split(/\r?\n/);
+        const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, '').toLowerCase());
+        const col = name => headers.indexOf(name);
+        const get = (row, name) => {
+            const i = col(name);
+            return i >= 0 ? (row[i] || '').trim().replace(/^"|"$/g, '') : '';
+        };
+
+        if (col('problem_slug') < 0 || col('problem_title') < 0) {
+            return res.status(400).json({ error: 'CSV must have problem_slug and problem_title columns' });
+        }
+
+        // Group rows by slug
+        const problemMap = new Map();
+        for (let i = 1; i < lines.length; i++) {
+            const row = lines[i].split(',');
+            if (row.length < 2) continue;
+            const slug = get(row, 'problem_slug');
+            if (!slug) continue;
+            if (!problemMap.has(slug)) {
+                problemMap.set(slug, {
+                    slug,
+                    title: get(row, 'problem_title') || slug,
+                    difficulty: get(row, 'difficulty') || 'Medium',
+                    description: get(row, 'description') || get(row, 'problem_title') || slug,
+                    testcases: [],
+                });
+            }
+            if (col('input') >= 0 && col('expected_output') >= 0) {
+                problemMap.get(slug).testcases.push({
+                    input: get(row, 'input'),
+                    expected_output: get(row, 'expected_output'),
+                    is_sample: get(row, 'is_sample').toLowerCase() === 'true',
+                });
+            }
+        }
+
+        // ── Upsert problems into DB ───────────────────────────
+        const problemIds = [];
+        const problemSlugs = [];
+        for (const p of problemMap.values()) {
+            const existing = await dbQuery('SELECT id FROM problems WHERE slug = $1', [p.slug]);
+            let problemId;
+            if (existing.rows.length > 0) {
+                problemId = existing.rows[0].id;
+                await dbQuery('UPDATE problems SET title=$1, is_published=true, updated_at=NOW() WHERE id=$2', [p.title, problemId]);
+            } else {
+                const diffLevel = ['Easy', 'Medium', 'Hard'].includes(p.difficulty) ? p.difficulty : 'Medium';
+                const ins = await dbQuery(
+                    `INSERT INTO problems (slug, title, description, difficulty, is_published)
+                     VALUES ($1,$2,$3,$4::difficulty_level,true) RETURNING id`,
+                    [p.slug, p.title, p.description, diffLevel]
+                );
+                problemId = ins.rows[0].id;
+            }
+            problemIds.push(problemId);
+            problemSlugs.push(p.slug);
+            for (const tc of p.testcases) {
+                await dbQuery(
+                    `INSERT INTO test_cases (problem_id, input, expected_output, is_sample, order_index)
+                     VALUES ($1,$2,$3,$4,0)
+                     ON CONFLICT DO NOTHING`,
+                    [problemId, tc.input, tc.expected_output, tc.is_sample]
+                );
+            }
+        }
+
+        // ── Store in tournament + assign to rooms ─────────────
+        tournament[`${setType}SetProblemIds`] = problemIds;
+        tournament[`${setType}SetSlugs`] = problemSlugs;
+        tournament[`${setType}SetCount`] = problemIds.length;
+        tournament[`${setType}SetUploadedAt`] = Date.now();
+
+        // odd pairNo → odd set, even pairNo → even set
+        for (const pair of (tournament.pairs || [])) {
+            const targetSet = pair.pairNo % 2 === 0 ? 'even' : 'odd';
+            if (targetSet !== setType) continue;
+            try {
+                const roomData = await redisClient.get(`room:${pair.roomCode}`);
+                if (roomData) {
+                    const room = JSON.parse(roomData);
+                    room.tournamentProblems = problemIds;
+                    room.questionCount = problemIds.length;
+                    await redisClient.set(`room:${pair.roomCode}`, JSON.stringify(room), 'EX', 86400);
+                }
+            } catch (e) { /* non-fatal */ }
+        }
+
+        await redisClient.set(`tournament:${req.params.id}`, JSON.stringify(tournament), 'EX', 86400);
+        logger.info(`Tournament ${req.params.id}: uploaded ${problemIds.length} problems for ${setType} set`);
+        res.json({ status: 'ok', problemsUploaded: problemIds.length, setType, slugs: problemSlugs });
+    } catch (err) {
+        logger.error('CSV upload error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/* ═══════════════════════════════════════════════════════════
+   PUT /api/tournament/:id/settings
+   Body: { timerMinutes?: number, bonusQuestion?: object }
+═══════════════════════════════════════════════════════════ */
+router.put('/:id/settings', async (req, res) => {
+    try {
+        const data = await redisClient.get(`tournament:${req.params.id}`);
+        if (!data) return res.status(404).json({ error: 'Tournament not found' });
+        const tournament = JSON.parse(data);
+
+        const { timerMinutes, bonusQuestion } = req.body;
+        if (timerMinutes !== undefined) {
+            tournament.timerMinutes = Math.max(1, Math.min(480, Number(timerMinutes)));
+        }
+        if (bonusQuestion !== undefined) {
+            tournament.bonusQuestion = bonusQuestion;
+        }
+
+        await redisClient.set(`tournament:${req.params.id}`, JSON.stringify(tournament), 'EX', 86400);
+        logger.info(`Tournament ${req.params.id}: settings updated`);
+        res.json({ status: 'ok', tournament });
+    } catch (err) {
+        logger.error('Tournament settings error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/* ═══════════════════════════════════════════════════════════
+   POST /api/tournament/:id/trigger-bonus/:roomCode
+   Sends bonus_round_start event to both teams in a tied room.
+═══════════════════════════════════════════════════════════ */
+router.post('/:id/trigger-bonus/:roomCode', async (req, res) => {
+    try {
+        const data = await redisClient.get(`tournament:${req.params.id}`);
+        if (!data) return res.status(404).json({ error: 'Tournament not found' });
+        const tournament = JSON.parse(data);
+
+        if (!tournament.bonusQuestion) {
+            return res.status(400).json({ error: 'No bonus question configured for this tournament' });
+        }
+
+        await broadcastToRoom(req.params.roomCode, {
+            type: 'bonus_round_start',
+            bonusQuestion: tournament.bonusQuestion,
+            timerSeconds: tournament.bonusQuestion.timerSeconds || 300,
+        });
+
+        logger.info(`Tournament ${req.params.id}: bonus round triggered for room ${req.params.roomCode}`);
+        res.json({ status: 'ok', roomCode: req.params.roomCode });
+    } catch (err) {
+        logger.error('Trigger bonus error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;

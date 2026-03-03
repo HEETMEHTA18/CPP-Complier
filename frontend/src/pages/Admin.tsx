@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useGameSocket } from '../hooks/useGameSocket';
-import { Settings, Swords, Users, Play, Copy, Check, RefreshCw, Database, Heart, Plus, Trash2, ChevronDown, ChevronUp, Activity, Trophy, Download, Lightbulb } from 'lucide-react';
+import { Settings, Swords, Users, Play, Copy, Check, RefreshCw, Database, Heart, Plus, Trash2, ChevronDown, ChevronUp, Activity, Trophy, Download, Lightbulb, Upload, Clock, Zap, LayoutList } from 'lucide-react';
 import axios from 'axios';
 import './Admin.css';
 
@@ -15,7 +15,7 @@ interface HintItem { id: string; content: string; order_index: number; }
 
 export default function Admin() {
     const navigate = useNavigate();
-    const [adminTab, setAdminTab] = useState<'game' | 'tournament' | 'problems' | 'health'>('game');
+    const [adminTab, setAdminTab] = useState<'game' | 'tournament' | 'problems' | 'health' | 'manage-tournament'>('game');
 
     // ── Game state ──────────────────────────────────────────
     const [questionCount, setQuestionCount] = useState(17);
@@ -53,6 +53,27 @@ export default function Admin() {
     const [tStarting, setTStarting] = useState(false);
     const [tCountdown, setTCountdown] = useState<number | null>(null);
     const tCountdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+    // ── Manage Tournament state ───────────────────────────
+    const [manageTId, setManageTId] = useState('');
+    const [manageTournament, setManageTournament] = useState<any>(null);
+    const [manageLB, setManageLB] = useState<any[]>([]);
+    const [manageLBLoading, setManageLBLoading] = useState(false);
+    const [manageLoading, setManageLoading] = useState(false);
+    const [manageError, setManageError] = useState('');
+    const [manageTimer, setManageTimer] = useState(90);
+    const [settingsSaving, setSettingsSaving] = useState(false);
+    const [bonusTitle, setBonusTitle] = useState('');
+    const [bonusDesc, setBonusDesc] = useState('');
+    const [bonusTimerSec, setBonusTimerSec] = useState(300);
+    const [bonusSaving, setBonusSaving] = useState(false);
+    const [csvStatus, setCsvStatus] = useState<{ even?: string; odd?: string }>({});
+    const [csvEvenUploading, setCsvEvenUploading] = useState(false);
+    const [csvOddUploading, setCsvOddUploading] = useState(false);
+    const [triggeringBonus, setTriggeringBonus] = useState<string | null>(null);
+    const evenCsvRef = useRef<HTMLInputElement>(null);
+    const oddCsvRef = useRef<HTMLInputElement>(null);
+
     // ── Health state ───────────────────────────────────────
     const [health, setHealth] = useState<any>(null);
     const [healthLoading, setHealthLoading] = useState(false);
@@ -253,6 +274,87 @@ export default function Admin() {
         }, 30000);
     };
 
+    // ── Manage Tournament handlers ─────────────────────────
+    const loadManageLB = async (tid: string) => {
+        setManageLBLoading(true);
+        try {
+            const res = await axios.get(`/api/tournament/${tid}/leaderboard`);
+            setManageLB(res.data.leaderboard || []);
+        } catch { setManageLB([]); }
+        setManageLBLoading(false);
+    };
+
+    const loadManagedTournament = async () => {
+        const tid = manageTId.trim().toUpperCase();
+        if (!tid) return;
+        setManageLoading(true); setManageError(''); setManageTournament(null);
+        try {
+            const res = await axios.get(`/api/tournament/${tid}`);
+            const t = res.data.tournament;
+            setManageTournament(t);
+            setManageTimer(t.timerMinutes || 90);
+            if (t.bonusQuestion) {
+                setBonusTitle(t.bonusQuestion.title || '');
+                setBonusDesc(t.bonusQuestion.description || '');
+                setBonusTimerSec(t.bonusQuestion.timerSeconds || 300);
+            }
+            if (t.oddSetCount) setCsvStatus(prev => ({ ...prev, odd: `✅ ${t.oddSetCount} problems (uploaded)` }));
+            if (t.evenSetCount) setCsvStatus(prev => ({ ...prev, even: `✅ ${t.evenSetCount} problems (uploaded)` }));
+            await loadManageLB(tid);
+        } catch (e: any) {
+            setManageError(e.response?.data?.error || 'Tournament not found. Check the ID.');
+        }
+        setManageLoading(false);
+    };
+
+    const saveTimerSettings = async () => {
+        setSettingsSaving(true);
+        try {
+            await axios.put(`/api/tournament/${manageTId.trim().toUpperCase()}/settings`, { timerMinutes: manageTimer });
+            setManageTournament((prev: any) => ({ ...prev, timerMinutes: manageTimer }));
+        } catch (e: any) { alert(e.response?.data?.error || 'Failed to save timer'); }
+        setSettingsSaving(false);
+    };
+
+    const saveBonusQuestion = async () => {
+        if (!bonusTitle.trim()) return;
+        setBonusSaving(true);
+        try {
+            await axios.put(`/api/tournament/${manageTId.trim().toUpperCase()}/settings`, {
+                bonusQuestion: { title: bonusTitle.trim(), description: bonusDesc.trim(), timerSeconds: bonusTimerSec },
+            });
+            setManageTournament((prev: any) => ({ ...prev, bonusQuestion: { title: bonusTitle, description: bonusDesc, timerSeconds: bonusTimerSec } }));
+        } catch (e: any) { alert(e.response?.data?.error || 'Failed to save bonus question'); }
+        setBonusSaving(false);
+    };
+
+    const uploadCSV = async (file: File, setType: 'even' | 'odd') => {
+        const tid = manageTId.trim().toUpperCase();
+        if (!tid) return;
+        if (setType === 'even') setCsvEvenUploading(true); else setCsvOddUploading(true);
+        setCsvStatus(prev => ({ ...prev, [setType]: '⏳ Uploading...' }));
+        try {
+            const csvContent = await file.text();
+            const res = await axios.post(`/api/tournament/${tid}/upload-csv`, { csvContent, setType });
+            setCsvStatus(prev => ({ ...prev, [setType]: `✅ ${res.data.problemsUploaded} problems uploaded` }));
+            await loadManagedTournament();
+        } catch (e: any) {
+            setCsvStatus(prev => ({ ...prev, [setType]: `❌ ${e.response?.data?.error || 'Upload failed'}` }));
+        }
+        if (setType === 'even') { setCsvEvenUploading(false); if (evenCsvRef.current) evenCsvRef.current.value = ''; }
+        else { setCsvOddUploading(false); if (oddCsvRef.current) oddCsvRef.current.value = ''; }
+    };
+
+    const triggerBonusRound = async (roomCode: string) => {
+        if (!confirm(`Send bonus tiebreaker question to room ${roomCode}?`)) return;
+        setTriggeringBonus(roomCode);
+        try {
+            await axios.post(`/api/tournament/${manageTId.trim().toUpperCase()}/trigger-bonus/${roomCode}`);
+            alert(`✅ Bonus round sent to room ${roomCode}!`);
+        } catch (e: any) { alert(e.response?.data?.error || 'Failed to trigger bonus'); }
+        setTriggeringBonus(null);
+    };
+
     // ── Health handlers ────────────────────────────────────
     const checkHealth = async () => {
         setHealthLoading(true); setHealthError('');
@@ -311,6 +413,9 @@ export default function Admin() {
                     </button>
                     <button className={`admin-tab-btn ${adminTab === 'tournament' ? 'active' : ''}`} onClick={() => setAdminTab('tournament')}>
                         <Trophy size={15} /> Tournament
+                    </button>
+                    <button className={`admin-tab-btn ${adminTab === 'manage-tournament' ? 'active' : ''}`} onClick={() => setAdminTab('manage-tournament')}>
+                        <LayoutList size={15} /> Manage Contest
                     </button>
                     <button className={`admin-tab-btn ${adminTab === 'problems' ? 'active' : ''}`} onClick={() => setAdminTab('problems')}>
                         <Database size={15} /> Problem Manager
@@ -580,6 +685,225 @@ export default function Admin() {
                                 </div>
                             </div>
                         )}
+                    </div>
+                )}
+
+                {adminTab === 'manage-tournament' && (
+                    <div className="manage-t-root">
+                        {/* ── Load Tournament ── */}
+                        <div className="admin-card glass-panel">
+                            <h2 className="admin-card-title"><LayoutList size={18} style={{ marginRight: 8 }} />Manage Contest</h2>
+                            <p className="admin-sub">Enter a Tournament ID to load and manage it — upload question sets, set timers, configure bonus tiebreaker, and view the live leaderboard.</p>
+                            <div className="manage-load-row">
+                                <input
+                                    className="admin-input manage-tid-input"
+                                    placeholder="Tournament ID  e.g. T-A1B2C3"
+                                    value={manageTId}
+                                    onChange={e => setManageTId(e.target.value.toUpperCase())}
+                                    onKeyDown={e => e.key === 'Enter' && loadManagedTournament()}
+                                />
+                                <button className="btn btn-primary" onClick={loadManagedTournament} disabled={manageLoading || !manageTId.trim()}>
+                                    {manageLoading ? <RefreshCw size={15} className="spinning" /> : 'Load Tournament'}
+                                </button>
+                                {manageTournament && (
+                                    <button className="btn btn-secondary" onClick={() => loadManageLB(manageTId)} disabled={manageLBLoading}>
+                                        <RefreshCw size={14} className={manageLBLoading ? 'spinning' : ''} /> Refresh LB
+                                    </button>
+                                )}
+                            </div>
+                            {manageError && <div className="admin-error">{manageError}</div>}
+                        </div>
+
+                        {manageTournament && (<>
+                            {/* ── Tournament Overview ── */}
+                            <div className="admin-card glass-panel mt-t-info">
+                                <div className="mt-overview">
+                                    <div className="mt-overview-badge"><Trophy size={22} color="var(--neon-cyan)" /></div>
+                                    <div>
+                                        <div className="mt-overview-name">{manageTournament.name}</div>
+                                        <div className="mt-overview-meta">
+                                            <span>{manageTournament.rooms?.length || 0} rooms</span>
+                                            <span>·</span>
+                                            <span>{(manageTournament.rooms?.length || 0) * 2} teams</span>
+                                            <span>·</span>
+                                            <span>ID: <code>{manageTournament.id}</code></span>
+                                            {manageTournament.timerMinutes && <><span>·</span><span><Clock size={12} /> {manageTournament.timerMinutes} min</span></>}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* ── CSV Upload ── */}
+                            <div className="admin-card glass-panel">
+                                <h3 className="mt-section-title"><Upload size={16} /> Question Set Upload</h3>
+                                <p className="admin-sub">Upload two CSV sets — <strong>Odd Set</strong> goes to rooms 1, 3, 5… and <strong>Even Set</strong> goes to rooms 2, 4, 6… so adjacent rooms get different problems.</p>
+                                <p className="admin-sub" style={{ marginTop: 4 }}>CSV columns: <code>problem_slug, problem_title, difficulty, description, input, expected_output, is_sample</code></p>
+                                <div className="csv-upload-row">
+                                    {/* Odd Set */}
+                                    <div className="csv-upload-card odd">
+                                        <div className="csv-upload-label">
+                                            <span className="csv-badge odd">ODD SET</span>
+                                            <span className="admin-hint">Rooms 1, 3, 5…</span>
+                                        </div>
+                                        {csvStatus.odd && <div className="csv-status">{csvStatus.odd}</div>}
+                                        <input ref={oddCsvRef} type="file" accept=".csv" style={{ display: 'none' }}
+                                            onChange={e => { const f = e.target.files?.[0]; if (f) uploadCSV(f, 'odd'); }} />
+                                        <button className="btn btn-primary csv-upload-btn"
+                                            onClick={() => oddCsvRef.current?.click()}
+                                            disabled={csvOddUploading}>
+                                            {csvOddUploading ? <RefreshCw size={14} className="spinning" /> : <Upload size={14} />}
+                                            {csvOddUploading ? 'Uploading…' : 'Upload Odd Set CSV'}
+                                        </button>
+                                    </div>
+                                    {/* Even Set */}
+                                    <div className="csv-upload-card even">
+                                        <div className="csv-upload-label">
+                                            <span className="csv-badge even">EVEN SET</span>
+                                            <span className="admin-hint">Rooms 2, 4, 6…</span>
+                                        </div>
+                                        {csvStatus.even && <div className="csv-status">{csvStatus.even}</div>}
+                                        <input ref={evenCsvRef} type="file" accept=".csv" style={{ display: 'none' }}
+                                            onChange={e => { const f = e.target.files?.[0]; if (f) uploadCSV(f, 'even'); }} />
+                                        <button className="btn btn-primary csv-upload-btn"
+                                            onClick={() => evenCsvRef.current?.click()}
+                                            disabled={csvEvenUploading}>
+                                            {csvEvenUploading ? <RefreshCw size={14} className="spinning" /> : <Upload size={14} />}
+                                            {csvEvenUploading ? 'Uploading…' : 'Upload Even Set CSV'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* ── Timer Settings ── */}
+                            <div className="admin-card glass-panel">
+                                <h3 className="mt-section-title"><Clock size={16} /> Timer Settings</h3>
+                                <p className="admin-sub">Set the total contest duration. This is broadcast to all teams when the contest starts.</p>
+                                <div className="mt-timer-row">
+                                    <div className="admin-field" style={{ flex: 1 }}>
+                                        <label>Contest Duration (minutes)</label>
+                                        <div className="q-count-row">
+                                            {[30, 45, 60, 90, 120].map(n => (
+                                                <button key={n} className={`q-count-btn ${manageTimer === n ? 'active' : ''}`}
+                                                    onClick={() => setManageTimer(n)}>{n}</button>
+                                            ))}
+                                            <input type="number" className="admin-input" style={{ width: 80 }}
+                                                min={1} max={480} value={manageTimer}
+                                                onChange={e => setManageTimer(Number(e.target.value))} />
+                                        </div>
+                                    </div>
+                                    <button className="btn btn-primary" onClick={saveTimerSettings} disabled={settingsSaving}>
+                                        {settingsSaving ? <RefreshCw size={14} className="spinning" /> : <Check size={14} />}
+                                        Save Timer
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* ── Bonus Question ── */}
+                            <div className="admin-card glass-panel">
+                                <h3 className="mt-section-title"><Zap size={16} /> Bonus Tiebreaker Question</h3>
+                                <p className="admin-sub">When a game ends in a <strong>DRAW</strong>, you can send this bonus question to both teams. The first team to solve it completely wins. Use the trigger button in the leaderboard below.</p>
+                                <div className="bonus-q-form">
+                                    <div className="admin-field">
+                                        <label>Question Title</label>
+                                        <input className="admin-input" placeholder="e.g. Tiebreaker: Two Sum"
+                                            value={bonusTitle} onChange={e => setBonusTitle(e.target.value)} />
+                                    </div>
+                                    <div className="admin-field">
+                                        <label>Problem Description</label>
+                                        <textarea className="pm-textarea" rows={4}
+                                            placeholder="Describe the problem clearly — input format, output format, constraints, examples..."
+                                            value={bonusDesc} onChange={e => setBonusDesc(e.target.value)} />
+                                    </div>
+                                    <div className="admin-field">
+                                        <label>Bonus Timer (seconds)</label>
+                                        <div className="q-count-row">
+                                            {[120, 180, 300, 600].map(n => (
+                                                <button key={n} className={`q-count-btn ${bonusTimerSec === n ? 'active' : ''}`}
+                                                    onClick={() => setBonusTimerSec(n)}>{n}s</button>
+                                            ))}
+                                            <input type="number" className="admin-input" style={{ width: 80 }}
+                                                min={30} max={1800} value={bonusTimerSec}
+                                                onChange={e => setBonusTimerSec(Number(e.target.value))} />
+                                        </div>
+                                    </div>
+                                    {manageTournament.bonusQuestion && (
+                                        <div className="bonus-q-saved">
+                                            <Zap size={14} color="var(--neon-cyan)" />
+                                            <span>Saved: <strong>{manageTournament.bonusQuestion.title}</strong> · {manageTournament.bonusQuestion.timerSeconds}s timer</span>
+                                        </div>
+                                    )}
+                                    <button className="btn btn-primary" onClick={saveBonusQuestion} disabled={bonusSaving || !bonusTitle.trim()}>
+                                        {bonusSaving ? <RefreshCw size={14} className="spinning" /> : <Zap size={14} />}
+                                        Save Bonus Question
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* ── Live Leaderboard ── */}
+                            <div className="admin-card glass-panel">
+                                <div className="pm-header">
+                                    <h3 className="mt-section-title" style={{ margin: 0 }}><Trophy size={16} /> Live Leaderboard — {manageTournament.name}</h3>
+                                    <button className="btn btn-secondary pm-refresh" onClick={() => loadManageLB(manageTId)} disabled={manageLBLoading}>
+                                        <RefreshCw size={14} className={manageLBLoading ? 'spinning' : ''} />
+                                    </button>
+                                </div>
+                                {manageLBLoading ? (
+                                    <div className="pm-loading"><RefreshCw size={18} className="spinning" /> Loading leaderboard…</div>
+                                ) : manageLB.length === 0 ? (
+                                    <div className="pm-loading" style={{ color: 'var(--text-muted)' }}>No data yet — teams need to join and play.</div>
+                                ) : (
+                                    <div className="mt-lb-wrap">
+                                        <table className="mt-lb-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>Rank</th>
+                                                    <th>Team</th>
+                                                    <th>Pair</th>
+                                                    <th>Solved</th>
+                                                    <th>Status</th>
+                                                    <th>Action</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {manageLB.map(entry => (
+                                                    <tr key={`${entry.pairNo}-${entry.teamId}`} className={`mt-lb-row ${entry.isWinner ? 'winner-row' : ''} ${entry.phase === 'ended' && !entry.isWinner ? 'loser-row' : ''}`}>
+                                                        <td className="mt-lb-rank">
+                                                            {entry.rank === 1 ? '🥇' : entry.rank === 2 ? '🥈' : entry.rank === 3 ? '🥉' : `#${entry.rank}`}
+                                                        </td>
+                                                        <td className="mt-lb-team">
+                                                            <span className={`team-dot ${entry.teamId === 'A' ? 'dot-a' : 'dot-b'}`} />
+                                                            {entry.teamName}
+                                                            {entry.isWinner && <span className="winner-badge">🏆 WIN</span>}
+                                                        </td>
+                                                        <td className="mt-lb-pair">P{entry.pairNo}</td>
+                                                        <td className="mt-lb-solved">{entry.solved}</td>
+                                                        <td>
+                                                            <span className={`phase-badge phase-${entry.phase}`}>
+                                                                {entry.phase === 'waiting' ? '⏳ Waiting' : entry.phase === 'playing' ? '🎮 Live' : entry.phase === 'ended' ? '🏁 Done' : entry.phase}
+                                                            </span>
+                                                        </td>
+                                                        <td>
+                                                            {entry.phase === 'ended' && !entry.isWinner && (
+                                                                <button
+                                                                    className="btn-bonus-trigger"
+                                                                    title="Send bonus tiebreaker to this room"
+                                                                    onClick={() => triggerBonusRound(entry.roomCode)}
+                                                                    disabled={triggeringBonus === entry.roomCode || !manageTournament.bonusQuestion}>
+                                                                    {triggeringBonus === entry.roomCode
+                                                                        ? <RefreshCw size={12} className="spinning" />
+                                                                        : <Zap size={12} />}
+                                                                    Bonus
+                                                                </button>
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+                            </div>
+                        </>)}
                     </div>
                 )}
 
