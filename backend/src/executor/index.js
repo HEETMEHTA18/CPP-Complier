@@ -149,9 +149,11 @@ class Executor {
     if (_compileInflight.has(compileHash)) {
       logger.debug(`[exec] waiting for in-flight compile ${compileHash.slice(0, 8)}`);
       const result = await _compileInflight.get(compileHash);
-      if (result.success) {
-        const refreshed = await _getBinCache(compileHash);
-        if (refreshed) { this.executable = refreshed; return { success: true }; }
+      // result.execPath is set by Tier 3 after chmod + putBinCache, so it is
+      // guaranteed to be present and exec-ready when this branch resolves.
+      if (result.success && result.execPath) {
+        this.executable = result.execPath;
+        return { success: true };
       }
       return result;
     }
@@ -160,35 +162,44 @@ class Executor {
     const cacheTarget = path.join(_binCacheDir, `${compileHash}.out`);
     const args = this.config.compileArgs(this.sourceFile, cacheTarget);
 
-    const compilePromise = new Promise((resolve) => {
-      execFile(
-        this.config.compiler,
-        args,
-        { timeout: COMPILE_TIMEOUT_MS, maxBuffer: 512 * 1024 },
-        (_error, _stdout, stderr) => {
-          if (_error) {
-            let msg = (stderr || _error.message || 'Compilation Error').trim();
-            msg = msg.replace(/[^\s]+source\.(cpp|c):/g, 'Line ');
-            if (msg.includes('command not found') || msg.includes('not recognized')) {
-              msg = 'Compiler (g++/gcc) is not installed or not on PATH.';
+    // Wrap the ENTIRE compile → chmod → putBinCache sequence in one promise so
+    // that Tier 2 waiters only wake up once the binary is fully ready.
+    const fullCompilePromise = (async () => {
+      const compileResult = await new Promise((resolve) => {
+        execFile(
+          this.config.compiler,
+          args,
+          { timeout: COMPILE_TIMEOUT_MS, maxBuffer: 512 * 1024 },
+          (_error, _stdout, stderr) => {
+            if (_error) {
+              let msg = (stderr || _error.message || 'Compilation Error').trim();
+              msg = msg.replace(/[^\s]+source\.(cpp|c):/g, 'Line ');
+              if (msg.includes('command not found') || msg.includes('not recognized')) {
+                msg = 'Compiler (g++/gcc) is not installed or not on PATH.';
+              }
+              return resolve({ success: false, error: msg });
             }
-            return resolve({ success: false, error: msg });
+            resolve({ success: true });
           }
-          resolve({ success: true });
-        }
-      );
-    });
+        );
+      });
 
-    _compileInflight.set(compileHash, compilePromise);
+      if (!compileResult.success) return compileResult;
+
+      // Ensure the binary has execute permission (required on Docker/Windows mounts
+      // where g++ may produce a file without the +x bit set).
+      await fs.chmod(cacheTarget, 0o755).catch(() => {});
+      _putBinCache(compileHash, cacheTarget);
+      logger.debug(`[exec] compiled + cached ${compileHash.slice(0, 8)}`);
+      // Include execPath so Tier 2 waiters get the path without racing the cache map.
+      return { success: true, execPath: cacheTarget };
+    })();
+
+    _compileInflight.set(compileHash, fullCompilePromise);
     try {
-      const result = await compilePromise;
+      const result = await fullCompilePromise;
       if (result.success) {
-        // Ensure the binary has execute permission (required on Docker/Windows mounts
-        // where g++ may produce a file without the +x bit set).
-        await fs.chmod(cacheTarget, 0o755).catch(() => {});
-        _putBinCache(compileHash, cacheTarget);
         this.executable = cacheTarget;
-        logger.debug(`[exec] compiled + cached ${compileHash.slice(0, 8)}`);
       }
       return result;
     } finally {
